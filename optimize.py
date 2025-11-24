@@ -1,109 +1,151 @@
 import argparse
+import sys
 import time
 from pathlib import Path
 from PIL import Image
 from concurrent.futures import ProcessPoolExecutor
-import os
 
-# إعدادات افتراضية
-DEFAULT_QUALITY = 80
+# --- إعدادات ثابتة ---
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
 
 def log(message):
-    """طباعة رسائل متوافقة مع قارئ الشاشة"""
+    """طباعة متوافقة مع قارئ الشاشة"""
     print(message)
 
-def process_single_image(file_info):
-    """دالة تعالج صورة واحدة ليتم تشغيلها بشكل متوازي"""
-    file_path, output_dir, quality, max_width = file_info
+def get_input(prompt, default_value=None):
+    """دالة مساعدة لأخذ المدخلات من المستخدم مع قيمة افتراضية"""
+    if default_value:
+        user_input = input(f"{prompt} (الافتراضي: {default_value}): ").strip()
+        return user_input if user_input else default_value
+    else:
+        return input(f"{prompt}: ").strip()
+
+def process_single_image(args_tuple):
+    """معالجة صورة واحدة (مصممة لتعمل بشكل متوازي)"""
+    file_path, output_dir, quality, max_width = args_tuple
     
     try:
-        img_name = file_path.stem
-        new_filename = f"{img_name}.webp"
-        output_file_path = output_dir / new_filename
-
-        original_size = file_path.stat().st_size
-        
         with Image.open(file_path) as img:
-            # تغيير الحجم إذا تم طلب ذلك
+            # منطق تغيير الحجم الذكي (يحافظ على النسبة والتناسب)
+            # نقوم بالتصغير فقط إذا كان العرض الأصلي أكبر من العرض المطلوب
             if max_width and img.width > max_width:
+                # حساب نسبة التصغير (العرض المطلوب / العرض الأصلي)
                 ratio = max_width / img.width
+                # حساب الطول الجديد بناءً على النسبة للحفاظ على الشكل
                 new_height = int(img.height * ratio)
+                # تنفيذ تغيير الحجم باستخدام فلتر عالي الجودة
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
 
-            # الحفظ بأقصى ضغط
+            # تجهيز المسار الجديد
+            new_filename = f"{file_path.stem}.webp"
+            output_file_path = output_dir / new_filename
+            
+            # الحفظ
             img.save(
                 output_file_path, 
                 'webp', 
                 quality=quality, 
                 method=6
             )
-        
-        new_size = output_file_path.stat().st_size
-        saved = original_size - new_size
-        return (True, file_path.name, saved)
+            
+        return (True, file_path.name)
 
     except Exception as e:
-        return (False, file_path.name, str(e))
+        return (False, f"{file_path.name}: {str(e)}")
 
 def main():
-    parser = argparse.ArgumentParser(description="أداة ضغط الصور وتحويلها إلى WebP")
-    
-    # استقبال المدخلات عبر Flags
-    parser.add_argument("input_path", help="مسار المجلد الذي يحتوي على الصور")
-    parser.add_argument("-q", "--quality", type=int, default=80, help="جودة الصورة (من 1 إلى 100). الافتراضي 80")
-    parser.add_argument("-w", "--width", type=int, help="أقصى عرض للصورة (اختياري)")
-    parser.add_argument("-o", "--output", help="اسم مجلد المخرجات (اختياري)")
+    parser = argparse.ArgumentParser(description="أداة ضغط الصور للويب")
+    parser.add_argument("-i", "--interactive", action="store_true", help="تشغيل الوضع التفاعلي (سؤال وجواب)")
+    parser.add_argument("path", nargs="?", help="مسار المجلد (في حالة عدم استخدام الوضع التفاعلي)")
     
     args = parser.parse_args()
 
-    input_dir = Path(args.input_path)
+    # متغيرات سنملؤها سواء من التيرمينال مباشرة أو من الوضع التفاعلي
+    input_path_str = ""
+    target_width = 1920 # القيمة القياسية المفضلة
+    output_folder_name = "optimized_webp"
+    quality = 80
 
+    # --- المنطق التفاعلي ---
+    if args.interactive:
+        log("--- الوضع التفاعلي ---")
+        
+        # 1. طلب المسار
+        while not input_path_str:
+            input_path_str = get_input("أدخل مسار مجلد الصور")
+            if not input_path_str:
+                log("يجب إدخال مسار.")
+
+        # 2. طلب العرض (مع افتراضي 1920)
+        width_input = get_input("أدخل أقصى عرض للصورة", default_value="1920")
+        try:
+            target_width = int(width_input)
+        except ValueError:
+            log("قيمة غير صحيحة للعرض، سيتم استخدام 1920 تلقائياً.")
+            target_width = 1920
+
+        # 3. طلب اسم مجلد الإخراج
+        output_folder_name = get_input("اسم مجلد الحفظ الجديد", default_value="optimized_webp")
+
+    else:
+        # وضع سطر الأوامر العادي السريع
+        if not args.path:
+            log("خطأ: يجب تحديد مسار المجلد أو استخدام الخيار -i للوضع التفاعلي.")
+            log("مثال: python tool.py -i")
+            return
+        input_path_str = args.path
+
+    # --- بدء المعالجة ---
+    input_dir = Path(input_path_str)
+    
     if not input_dir.exists():
-        log(f"خطأ: المسار '{input_dir}' غير موجود.")
+        log(f"خطأ: المجلد '{input_dir}' غير موجود.")
         return
 
-    # تحديد مجلد المخرجات
-    output_folder_name = args.output if args.output else "optimized_webp"
     output_dir = input_dir / output_folder_name
     output_dir.mkdir(exist_ok=True)
 
-    # جمع الملفات
+    # جلب الصور
     files = [f for f in input_dir.iterdir() if f.suffix.lower() in EXTENSIONS and f.is_file()]
-
+    
     if not files:
-        log("لم يتم العثور على صور.")
+        log("لم يتم العثور على صور مدعومة في المجلد.")
         return
 
-    log(f"تم العثور على {len(files)} صورة.")
-    log(f"الإعدادات: الجودة={args.quality}, أقصى عرض={args.width if args.width else 'أصلي'}")
-    log("جاري المعالجة...")
+    log("-" * 30)
+    log(f"المجلد المختار: {input_dir}")
+    log(f"عدد الصور: {len(files)}")
+    log(f"أقصى عرض سيتم تطبيقه: {target_width} بكسل (مع الحفاظ على التناسب)")
+    log(f"سيتم الحفظ في: {output_folder_name}")
+    log("-" * 30)
+    log("جاري المعالجة... يرجى الانتظار...")
 
-    # تجهيز البيانات للمعالجة المتوازية
-    # نمرر البيانات كـ Tuple لأن ProcessPoolExecutor يحتاج دالة بمدخل واحد غالباً للسهولة
-    tasks = [(f, output_dir, args.quality, args.width) for f in files]
-
+    start_time = time.time()
     success_count = 0
-    total_saved = 0
 
-    # استخدام المعالجة المتوازية لاستغلال كل أنوية المعالج لديك (Ryzen 6 Cores)
+    # تجهيز المهام للمعالجة المتوازية
+    tasks = [(f, output_dir, quality, target_width) for f in files]
+
+    # التنفيذ
     with ProcessPoolExecutor() as executor:
         results = executor.map(process_single_image, tasks)
         
         for result in results:
-            is_success, name, data = result
-            if is_success:
+            status, msg = result
+            if status:
                 success_count += 1
-                total_saved += data
-                # طباعة بسيطة لكل ملف تنتهي معالجته
-                log(f"تم: {name}") 
+                log(f"تم: {msg}")
             else:
-                log(f"فشل {name}: {data}")
+                log(f"فشل: {msg}")
+
+    end_time = time.time()
+    duration = end_time - start_time
 
     log("-" * 30)
-    log(f"اكتملت العملية بنجاح لـ {success_count} صورة.")
-    log(f"إجمالي المساحة الموفرة: {total_saved / 1024 / 1024:.2f} ميجابايت")
-    log(f"المسار: {output_dir}")
+    log(f"اكتملت العملية.")
+    log(f"تم تحويل {success_count} من أصل {len(files)} صورة.")
+    log(f"الزمن المستغرق: {duration:.2f} ثانية.")
+    log(f"مسار الصور الجديدة: {output_dir}")
 
 if __name__ == "__main__":
     main()
