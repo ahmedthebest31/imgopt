@@ -1,88 +1,109 @@
-import os
-import sys
+import argparse
 import time
 from pathlib import Path
 from PIL import Image
+from concurrent.futures import ProcessPoolExecutor
+import os
 
-# دالة لطباعة النصوص بطريقة متوافقة مع قارئ الشاشة (سطر بسطر)
+# إعدادات افتراضية
+DEFAULT_QUALITY = 80
+EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
+
 def log(message):
+    """طباعة رسائل متوافقة مع قارئ الشاشة"""
     print(message)
 
-def optimize_images_for_web(input_path, quality=80):
-    # تحويل المدخل إلى كائن مسار للتعامل الذكي مع النصوص
-    input_dir = Path(input_path)
+def process_single_image(file_info):
+    """دالة تعالج صورة واحدة ليتم تشغيلها بشكل متوازي"""
+    file_path, output_dir, quality, max_width = file_info
     
+    try:
+        img_name = file_path.stem
+        new_filename = f"{img_name}.webp"
+        output_file_path = output_dir / new_filename
+
+        original_size = file_path.stat().st_size
+        
+        with Image.open(file_path) as img:
+            # تغيير الحجم إذا تم طلب ذلك
+            if max_width and img.width > max_width:
+                ratio = max_width / img.width
+                new_height = int(img.height * ratio)
+                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+
+            # الحفظ بأقصى ضغط
+            img.save(
+                output_file_path, 
+                'webp', 
+                quality=quality, 
+                method=6
+            )
+        
+        new_size = output_file_path.stat().st_size
+        saved = original_size - new_size
+        return (True, file_path.name, saved)
+
+    except Exception as e:
+        return (False, file_path.name, str(e))
+
+def main():
+    parser = argparse.ArgumentParser(description="أداة ضغط الصور وتحويلها إلى WebP")
+    
+    # استقبال المدخلات عبر Flags
+    parser.add_argument("input_path", help="مسار المجلد الذي يحتوي على الصور")
+    parser.add_argument("-q", "--quality", type=int, default=80, help="جودة الصورة (من 1 إلى 100). الافتراضي 80")
+    parser.add_argument("-w", "--width", type=int, help="أقصى عرض للصورة (اختياري)")
+    parser.add_argument("-o", "--output", help="اسم مجلد المخرجات (اختياري)")
+    
+    args = parser.parse_args()
+
+    input_dir = Path(args.input_path)
+
     if not input_dir.exists():
-        log(f"خطأ: المجلد '{input_path}' غير موجود.")
+        log(f"خطأ: المسار '{input_dir}' غير موجود.")
         return
 
-    # إنشاء مجلد للمخرجات داخل المجلد الأصلي باسم 'optimized_webp'
-    output_dir = input_dir / "optimized_webp"
+    # تحديد مجلد المخرجات
+    output_folder_name = args.output if args.output else "optimized_webp"
+    output_dir = input_dir / output_folder_name
     output_dir.mkdir(exist_ok=True)
 
-    # قائمة الامتدادات المدعومة
-    extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
-    
-    # جلب جميع الملفات
-    files = [f for f in input_dir.iterdir() if f.suffix.lower() in extensions and f.is_file()]
+    # جمع الملفات
+    files = [f for f in input_dir.iterdir() if f.suffix.lower() in EXTENSIONS and f.is_file()]
 
     if not files:
-        log("لم يتم العثور على صور في هذا المجلد.")
+        log("لم يتم العثور على صور.")
         return
 
-    log(f"تم العثور على {len(files)} صورة. جاري البدء بأقصى إعدادات ضغط...")
-    log("-" * 30)
+    log(f"تم العثور على {len(files)} صورة.")
+    log(f"الإعدادات: الجودة={args.quality}, أقصى عرض={args.width if args.width else 'أصلي'}")
+    log("جاري المعالجة...")
+
+    # تجهيز البيانات للمعالجة المتوازية
+    # نمرر البيانات كـ Tuple لأن ProcessPoolExecutor يحتاج دالة بمدخل واحد غالباً للسهولة
+    tasks = [(f, output_dir, args.quality, args.width) for f in files]
 
     success_count = 0
-    total_saved_space = 0
+    total_saved = 0
 
-    for file_path in files:
-        try:
-            # فتح الصورة
-            with Image.open(file_path) as img:
-                # تحديد اسم الملف الجديد (بدون الامتداد القديم)
-                # file.stem تأتي بالاسم فقط (مثلا image من image.png)
-                new_filename = f"{file_path.stem}.webp"
-                output_file_path = output_dir / new_filename
-
-                # حساب الحجم الأصلي
-                original_size = file_path.stat().st_size
-
-                # --- قلب السحر هنا ---
-                # method=6: أقصى جهد للضغط (أفضل نتيجة ممكنة)
-                # quality=quality: الجودة المطلوبة (80 هو المعيار الذهبي للويب)
-                img.save(
-                    output_file_path, 
-                    'webp', 
-                    quality=quality, 
-                    method=6
-                )
-                
-                # حساب الحجم الجديد
-                new_size = output_file_path.stat().st_size
-                saved = original_size - new_size
-                total_saved_space += saved
-                
-                # طباعة تقرير مختصر لكل ملف
-                log(f"تم: {file_path.name} -> {new_filename}")
-                # log(f"   وفرت: {saved / 1024:.1f} KB") 
-
+    # استخدام المعالجة المتوازية لاستغلال كل أنوية المعالج لديك (Ryzen 6 Cores)
+    with ProcessPoolExecutor() as executor:
+        results = executor.map(process_single_image, tasks)
+        
+        for result in results:
+            is_success, name, data = result
+            if is_success:
                 success_count += 1
-
-        except Exception as e:
-            log(f"فشل في معالجة {file_path.name}: {str(e)}")
+                total_saved += data
+                # طباعة بسيطة لكل ملف تنتهي معالجته
+                log(f"تم: {name}") 
+            else:
+                log(f"فشل {name}: {data}")
 
     log("-" * 30)
-    log("اكتملت العملية.")
-    log(f"تم تحويل {success_count} من أصل {len(files)} صورة.")
-    log(f"إجمالي المساحة التي تم توفيرها: {total_saved_space / 1024 / 1024:.2f} ميجابايت")
-    log(f"مسار الصور الجديدة: {output_dir}")
+    log(f"اكتملت العملية بنجاح لـ {success_count} صورة.")
+    log(f"إجمالي المساحة الموفرة: {total_saved / 1024 / 1024:.2f} ميجابايت")
+    log(f"المسار: {output_dir}")
 
 if __name__ == "__main__":
-    # التعامل مع الـ Arguments ليكون CLI محترم
-    if len(sys.argv) < 2:
-        log("طريقة الاستخدام:")
-        log("python optimize.py <path_to_images_folder>")
-    else:
-        folder_path = sys.argv[1]
-        optimize_images_for_web(folder_path)
+    main()
