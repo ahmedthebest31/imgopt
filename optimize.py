@@ -8,23 +8,37 @@ import logging
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image
+from typing import Optional, Tuple, List, Union, Any
 
-__version__ = "1.5.0"
+# --- Project Metadata ---
+__version__ = "1.0.0"
+__prog_name__ = "imgopt"
+
+# --- Configuration ---
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
 
-# Simple logging setup
-logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stdout)
+# --- Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s',
+    stream=sys.stdout
+)
 logger = logging.getLogger()
 
-def signal_handler(sig, frame):
-    logger.error("\nProcess interrupted. Exiting...")
+def signal_handler(sig, frame) -> None:
+    """Handle termination signals (Ctrl+C) gracefully."""
+    logger.error("\n[!] Process interrupted. Exiting...")
     sys.exit(1)
 
 signal.signal(signal.SIGINT, signal_handler)
 if hasattr(signal, 'SIGTERM'):
     signal.signal(signal.SIGTERM, signal_handler)
 
-def get_input_with_validation(prompt, validation_func, default_value=None):
+def get_input_with_validation(prompt: str, validation_func: callable, default_value: Optional[str] = None) -> Any:
+    """
+    Prompts user for input and validates it in a loop.
+    Supports 'q' to quit.
+    """
     while True:
         display_prompt = f"{prompt}"
         if default_value:
@@ -44,7 +58,8 @@ def get_input_with_validation(prompt, validation_func, default_value=None):
         
         logger.warning("Invalid input. Try again.")
 
-def validate_path(path_str):
+def validate_path(path_str: str) -> Optional[Path]:
+    """Checks if the path exists."""
     if not path_str: return None
     path = Path(path_str).resolve()
     if path.exists():
@@ -52,7 +67,8 @@ def validate_path(path_str):
     logger.warning(f"Path not found: {path_str}")
     return None
 
-def validate_width(width_str):
+def validate_width(width_str: str) -> Union[int, str, None]:
+    """Parses width input. Returns int, 'SKIP', or None."""
     if not width_str: return None
     if width_str.lower() in ['0', 'n', 'no', 'skip']:
         return 'SKIP' 
@@ -63,14 +79,15 @@ def validate_width(width_str):
     except ValueError:
         return None
 
-def validate_yes_no(val_str):
+def validate_yes_no(val_str: str) -> Optional[bool]:
+    """Parses yes/no string to boolean."""
     if not val_str: return None
     if val_str.lower().startswith('y'): return True
     if val_str.lower().startswith('n'): return False
     return None
 
-def get_unique_output_folder(base_folder, name):
-    # Prevents file/folder name collision
+def get_unique_output_folder(base_folder: Path, name: str) -> Path:
+    """Ensures output folder name is unique to avoid collisions."""
     output_path = base_folder / name
     if output_path.exists() and output_path.is_file():
         counter = 1
@@ -82,7 +99,11 @@ def get_unique_output_folder(base_folder, name):
             counter += 1
     return output_path
 
-def process_single_image(args_tuple):
+def process_single_image(args_tuple: Tuple) -> Tuple[bool, str, int, int]:
+    """
+    Core image processing logic.
+    Handles resizing and conversion to WebP.
+    """
     file_path, output_root, input_root, quality, max_width = args_tuple
     
     try:
@@ -93,6 +114,7 @@ def process_single_image(args_tuple):
         original_size = file_path.stat().st_size
         
         with Image.open(file_path) as img:
+            # Smart Resize
             if max_width and img.width > max_width:
                 ratio = max_width / img.width
                 new_height = int(img.height * ratio)
@@ -107,29 +129,60 @@ def process_single_image(args_tuple):
         return (False, f"{file_path.name}: {e}", 0, 0)
 
 def main():
-    parser = argparse.ArgumentParser(description="Image Optimizer")
-    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("-i", "--interactive", action="store_true", help="Interactive Mode")
-    parser.add_argument("path", nargs="?", help="Input folder")
-    parser.add_argument("--quiet", action="store_true", help="Quiet mode")
+    # Setting prog='imgopt' hides 'optimize.py' and makes it look like a binary
+    parser = argparse.ArgumentParser(
+        prog=__prog_name__,
+        description="A high-performance CLI tool to batch optimize images for the web.",
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog="Examples:\n"
+               "  imgopt                         (Interactive Wizard)\n"
+               "  imgopt ./photos -q 90          (Quick mode, high quality)\n"
+               "  imgopt ./photos -w 0           (Convert only, no resize)\n"
+               "  imgopt ./photos --output dist  (Custom output folder)"
+    )
     
+    # --- Professional CLI Arguments ---
+    parser.add_argument("-v", "--version", action="version", version=f"{__prog_name__} {__version__}")
+    
+    parser.add_argument("path", nargs="?", help="Input directory path containing images.")
+    
+    parser.add_argument("-o", "--output", type=str, default="optimized_webp",
+                        help="Name of the output folder (default: optimized_webp).")
+    
+    parser.add_argument("-w", "--width", type=str, default="1920",
+                        help="Max width in pixels. Use '0' to keep original size (default: 1920).")
+    
+    parser.add_argument("-q", "--quality", type=int, default=80,
+                        help="WebP quality (0-100) (default: 80).")
+    
+    parser.add_argument("-i", "--interactive", action="store_true", 
+                        help="Force launch of the interactive wizard.")
+    
+    parser.add_argument("--quiet", action="store_true", 
+                        help="Suppress per-file logs, showing only the final summary.")
+    
+    parser.add_argument("--no-sound", action="store_true", 
+                        help="Disable the completion notification sound (Beep).")
+
     args = parser.parse_args()
 
     # Defaults
     input_dir = None
-    target_width = 1920
-    output_folder_name = "optimized_webp"
-    quality = 80
+    target_width = None
+    output_folder_name = args.output
+    quality = args.quality
     verbose = not args.quiet
+    play_sound = not args.no_sound
     is_interactive = args.interactive
-    play_sound = True
 
+    # Auto-trigger interactive if no path is given
     if len(sys.argv) == 1:
         is_interactive = True
 
+    # --- Interactive Wizard Logic ---
     if is_interactive:
-        logger.info(f"Image Optimizer v{__version__}")
-        logger.info("Press 'q' to exit at any time.\n")
+        logger.info(f"{__prog_name__} v{__version__}")
+        logger.info("Interactive Mode (Press 'q' to quit at any time).\n")
         
         input_dir = get_input_with_validation("Input folder path", validate_path)
         
@@ -152,6 +205,7 @@ def main():
             default_value="n"
         )
         
+        # Audio preference in interactive mode
         play_sound = get_input_with_validation(
             "Play sound when done? (y/n)", 
             validate_yes_no, 
@@ -159,15 +213,21 @@ def main():
         )
         
     else:
-        if not args.path:
+        # --- CLI Mode Logic ---
+        input_dir = validate_path(args.path)
+        if not input_dir:
+            # If path is invalid in CLI mode, show help
             parser.print_help()
             sys.exit(1)
-        input_dir = validate_path(args.path)
-        if not input_dir: sys.exit(1)
+            
+        # Parse width argument from CLI
+        w_val = validate_width(args.width)
+        target_width = None if w_val == 'SKIP' else w_val
 
+    # --- Execution Logic ---
     output_dir = get_unique_output_folder(input_dir, output_folder_name)
     if input_dir == output_dir:
-        logger.error("Error: Input and Output cannot be the same.")
+        logger.error("Error: Input and Output folders cannot be the same.")
         sys.exit(1)
 
     output_dir.mkdir(exist_ok=True)
@@ -184,9 +244,14 @@ def main():
         logger.warning("No images found.")
         sys.exit(0)
 
-    logger.info(f"Total Images: {len(files)}")
-    logger.info(f"Resize: {target_width if target_width else 'Original'}")
-    logger.info(f"Output: {output_dir.name}")
+    # Info Summary
+    logger.info("-" * 40)
+    logger.info(f"Source:  {input_dir}")
+    logger.info(f"Target:  {output_dir.name}")
+    logger.info(f"Files:   {len(files)}")
+    logger.info(f"Width:   {target_width if target_width else 'Original'}")
+    logger.info(f"Quality: {quality}")
+    logger.info("-" * 40)
     
     start_time = time.time()
     tasks = [(f, output_dir, input_dir, quality, target_width) for f in files]
@@ -204,10 +269,10 @@ def main():
                     success += 1
                     orig_total += orig
                     new_total += new_s
-                    if verbose: logger.info(f"Success: {msg}")
+                    if verbose: logger.info(f"OK: {msg}")
                 else:
                     failed += 1
-                    logger.error(f"Failed: {msg}")
+                    logger.error(f"FAIL: {msg}")
 
     except KeyboardInterrupt:
         logger.error("\nCancelled.")
@@ -217,11 +282,10 @@ def main():
     saved_mb = saved / (1024 * 1024)
     pct = (saved / orig_total * 100) if orig_total > 0 else 0
     
-    logger.info("\nOptimization Complete")
-    logger.info(f"Success: {success}")
-    logger.info(f"Failed: {failed}")
-    logger.info(f"Saved: {saved_mb:.2f} MB ({pct:.1f}%)")
-    logger.info(f"Path: {output_dir}")
+    logger.info("\n" + "=" * 40)
+    logger.info(f"Finished: {success} OK | {failed} Failed")
+    logger.info(f"Saved:    {saved_mb:.2f} MB ({pct:.1f}%)")
+    logger.info("=" * 40)
     
     if play_sound: print('\a') 
     if success == 0 and len(files) > 0: sys.exit(1)
