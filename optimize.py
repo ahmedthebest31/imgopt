@@ -1,38 +1,86 @@
+#!/usr/bin/env python3
 import argparse
 import sys
 import time
 import os
 import signal
+import logging
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image
 
-# --- Version Info ---
-__version__ = "1.0.0"
-
-# --- Configuration ---
+__version__ = "1.5.0"
 EXTENSIONS = {'.png', '.jpg', '.jpeg', '.bmp', '.tiff'}
 
+# Simple logging setup
+logging.basicConfig(level=logging.INFO, format='%(message)s', stream=sys.stdout)
+logger = logging.getLogger()
+
 def signal_handler(sig, frame):
-    """Handle termination signals gracefully."""
-    print("\n[!] Process interrupted by system. Exiting...")
+    logger.error("\nProcess interrupted. Exiting...")
     sys.exit(1)
 
-# Register system signals
 signal.signal(signal.SIGINT, signal_handler)
 if hasattr(signal, 'SIGTERM'):
     signal.signal(signal.SIGTERM, signal_handler)
 
-def log(message, force=False, verbose=True):
-    if force or verbose:
-        print(message)
+def get_input_with_validation(prompt, validation_func, default_value=None):
+    while True:
+        display_prompt = f"{prompt}"
+        if default_value:
+            display_prompt += f" (Default: {default_value})"
+        
+        user_input = input(f"{display_prompt}: ").strip()
 
-def get_input(prompt, default_value=None):
-    if default_value:
-        user_input = input(f"{prompt} (Default: {default_value}): ").strip()
-        return user_input if user_input else default_value
-    else:
-        return input(f"{prompt}: ").strip()
+        if user_input.lower() in ['q', 'quit', 'exit']:
+            sys.exit(0)
+
+        if not user_input and default_value:
+            return default_value
+        
+        result = validation_func(user_input)
+        if result is not None:
+            return result
+        
+        logger.warning("Invalid input. Try again.")
+
+def validate_path(path_str):
+    if not path_str: return None
+    path = Path(path_str).resolve()
+    if path.exists():
+        return path
+    logger.warning(f"Path not found: {path_str}")
+    return None
+
+def validate_width(width_str):
+    if not width_str: return None
+    if width_str.lower() in ['0', 'n', 'no', 'skip']:
+        return 'SKIP' 
+    try:
+        val = int(width_str)
+        if val >= 0: return val if val > 0 else 'SKIP'
+        return None
+    except ValueError:
+        return None
+
+def validate_yes_no(val_str):
+    if not val_str: return None
+    if val_str.lower().startswith('y'): return True
+    if val_str.lower().startswith('n'): return False
+    return None
+
+def get_unique_output_folder(base_folder, name):
+    # Prevents file/folder name collision
+    output_path = base_folder / name
+    if output_path.exists() and output_path.is_file():
+        counter = 1
+        while True:
+            new_name = f"{name}_{counter}"
+            new_path = base_folder / new_name
+            if not new_path.is_file():
+                return new_path
+            counter += 1
+    return output_path
 
 def process_single_image(args_tuple):
     file_path, output_root, input_root, quality, max_width = args_tuple
@@ -56,108 +104,127 @@ def process_single_image(args_tuple):
         return (True, file_path.name, original_size, new_size)
 
     except Exception as e:
-        return (False, f"{file_path.name}: {str(e)}", 0, 0)
+        return (False, f"{file_path.name}: {e}", 0, 0)
 
 def main():
-    parser = argparse.ArgumentParser(description="Image Optimizer (WebP Converter)")
+    parser = argparse.ArgumentParser(description="Image Optimizer")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("-i", "--interactive", action="store_true", help="Run in interactive mode")
-    parser.add_argument("path", nargs="?", help="Input folder path")
-    parser.add_argument("--quiet", action="store_true", help="Suppress detailed per-file output")
+    parser.add_argument("-i", "--interactive", action="store_true", help="Interactive Mode")
+    parser.add_argument("path", nargs="?", help="Input folder")
+    parser.add_argument("--quiet", action="store_true", help="Quiet mode")
     
     args = parser.parse_args()
 
-    # Variables Init
-    input_path_str = ""
+    # Defaults
+    input_dir = None
     target_width = 1920
     output_folder_name = "optimized_webp"
     quality = 80
     verbose = not args.quiet
     is_interactive = args.interactive
+    play_sound = True
 
-    # Auto-Interactive Logic
     if len(sys.argv) == 1:
         is_interactive = True
 
     if is_interactive:
-        print(f"\n--- Image Optimizer Tool v{__version__} ---")
-        while not input_path_str:
-            input_path_str = get_input("Enter input folder path")
-            if not input_path_str:
-                print("Error: Path is required.")
+        logger.info(f"Image Optimizer v{__version__}")
+        logger.info("Press 'q' to exit at any time.\n")
         
-        try:
-            target_width = int(get_input("Max image width", default_value="1920"))
-        except ValueError:
-            target_width = 1920
-            
-        output_folder_name = get_input("Output folder name", default_value="optimized_webp")
-        show_details = get_input("Show detailed progress? (y/n)", default_value="n").lower()
-        verbose = show_details.startswith('y')
+        input_dir = get_input_with_validation("Input folder path", validate_path)
+        
+        width_result = get_input_with_validation(
+            "Max width (0 for original)",
+            validate_width, 
+            default_value="1920"
+        )
+        target_width = None if width_result == 'SKIP' else width_result
+
+        output_folder_name = get_input_with_validation(
+            "Output folder name", 
+            lambda x: x if x else None, 
+            default_value="optimized_webp"
+        )
+
+        verbose = get_input_with_validation(
+            "Show details? (y/n)", 
+            validate_yes_no, 
+            default_value="n"
+        )
+        
+        play_sound = get_input_with_validation(
+            "Play sound when done? (y/n)", 
+            validate_yes_no, 
+            default_value="y"
+        )
+        
     else:
         if not args.path:
-            print("Usage: imgopt <path> [options]")
-            sys.exit(1) # Exit with error code
-        input_path_str = args.path
+            parser.print_help()
+            sys.exit(1)
+        input_dir = validate_path(args.path)
+        if not input_dir: sys.exit(1)
 
-    input_dir = Path(input_path_str)
-    if not input_dir.exists():
-        print(f"Error: Directory '{input_dir}' not found.")
-        sys.exit(1) # Exit with error code
+    output_dir = get_unique_output_folder(input_dir, output_folder_name)
+    if input_dir == output_dir:
+        logger.error("Error: Input and Output cannot be the same.")
+        sys.exit(1)
 
-    output_dir = input_dir / output_folder_name
     output_dir.mkdir(exist_ok=True)
 
-    print("Scanning files...")
+    logger.info("Scanning...")
     files = [
         f for f in input_dir.rglob("*") 
         if f.suffix.lower() in EXTENSIONS 
         and f.is_file() 
-        and output_folder_name not in f.parts
+        and output_dir not in f.parents
     ]
 
     if not files:
-        print("No supported images found.")
-        sys.exit(0) # Exit success (nothing to do is not an error)
+        logger.warning("No images found.")
+        sys.exit(0)
 
-    print("-" * 40)
-    print(f"Processing {len(files)} images...")
+    logger.info(f"Total Images: {len(files)}")
+    logger.info(f"Resize: {target_width if target_width else 'Original'}")
+    logger.info(f"Output: {output_dir.name}")
     
     start_time = time.time()
     tasks = [(f, output_dir, input_dir, quality, target_width) for f in files]
-    success_count = 0
-    fail_count = 0
-    total_original = 0
-    total_new = 0
+    
+    success = 0
+    failed = 0
+    orig_total = 0
+    new_total = 0
 
-    with ProcessPoolExecutor() as executor:
-        results = executor.map(process_single_image, tasks)
-        for is_success, msg, orig, new_s in results:
-            if is_success:
-                success_count += 1
-                total_original += orig
-                total_new += new_s
-                log(f"[OK] {msg}", verbose=verbose)
-            else:
-                fail_count += 1
-                log(f"[FAILED] {msg}", force=True)
+    try:
+        with ProcessPoolExecutor() as executor:
+            results = executor.map(process_single_image, tasks)
+            for is_ok, msg, orig, new_s in results:
+                if is_ok:
+                    success += 1
+                    orig_total += orig
+                    new_total += new_s
+                    if verbose: logger.info(f"Success: {msg}")
+                else:
+                    failed += 1
+                    logger.error(f"Failed: {msg}")
 
-    end_time = time.time()
-    
-    # Final Stats
-    saved_mb = (total_original - total_new) / (1024 * 1024)
-    percent = (total_original - total_new) / total_original * 100 if total_original > 0 else 0
-    
-    print("\n" + "=" * 40)
-    print(f"DONE. Success: {success_count} | Failed: {fail_count}")
-    print(f"Saved: {saved_mb:.2f} MB ({percent:.1f}%)")
-    print("=" * 40)
-    print('\a') 
-    
-    # Exit code logic: If everything failed, return error code
-    if success_count == 0 and len(files) > 0:
+    except KeyboardInterrupt:
+        logger.error("\nCancelled.")
         sys.exit(1)
+
+    saved = orig_total - new_total
+    saved_mb = saved / (1024 * 1024)
+    pct = (saved / orig_total * 100) if orig_total > 0 else 0
     
+    logger.info("\nOptimization Complete")
+    logger.info(f"Success: {success}")
+    logger.info(f"Failed: {failed}")
+    logger.info(f"Saved: {saved_mb:.2f} MB ({pct:.1f}%)")
+    logger.info(f"Path: {output_dir}")
+    
+    if play_sound: print('\a') 
+    if success == 0 and len(files) > 0: sys.exit(1)
     sys.exit(0)
 
 if __name__ == "__main__":
