@@ -2,13 +2,12 @@
 import argparse
 import sys
 import time
-import os
 import signal
 import logging
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
 from PIL import Image
-from typing import Optional, Tuple, List, Union, Any
+from typing import Optional, Tuple, List, Union, Any, NamedTuple
 
 # --- Project Metadata ---
 __version__ = "1.0.0"
@@ -24,6 +23,13 @@ logging.basicConfig(
     stream=sys.stdout
 )
 logger = logging.getLogger()
+
+class ImageTask(NamedTuple):
+    file_path: Path
+    output_root: Path
+    input_root: Path
+    quality: int
+    max_width: Optional[int]
 
 def signal_handler(sig, frame) -> None:
     """Handle termination signals (Ctrl+C) gracefully."""
@@ -60,7 +66,8 @@ def get_input_with_validation(prompt: str, validation_func: callable, default_va
 
 def validate_path(path_str: str) -> Optional[Path]:
     """Checks if the path exists."""
-    if not path_str: return None
+    if not path_str:
+        return None
     path = Path(path_str).resolve()
     if path.exists():
         return path
@@ -69,21 +76,26 @@ def validate_path(path_str: str) -> Optional[Path]:
 
 def validate_width(width_str: str) -> Union[int, str, None]:
     """Parses width input. Returns int, 'SKIP', or None."""
-    if not width_str: return None
+    if not width_str:
+        return None
     if width_str.lower() in ['0', 'n', 'no', 'skip']:
         return 'SKIP' 
     try:
         val = int(width_str)
-        if val >= 0: return val if val > 0 else 'SKIP'
+        if val >= 0:
+            return val if val > 0 else 'SKIP'
         return None
     except ValueError:
         return None
 
 def validate_yes_no(val_str: str) -> Optional[bool]:
     """Parses yes/no string to boolean."""
-    if not val_str: return None
-    if val_str.lower().startswith('y'): return True
-    if val_str.lower().startswith('n'): return False
+    if not val_str:
+        return None
+    if val_str.lower().startswith('y'):
+        return True
+    if val_str.lower().startswith('n'):
+        return False
     return None
 
 def get_unique_output_folder(base_folder: Path, name: str) -> Path:
@@ -99,36 +111,38 @@ def get_unique_output_folder(base_folder: Path, name: str) -> Path:
             counter += 1
     return output_path
 
-def process_single_image(args_tuple: Tuple) -> Tuple[bool, str, int, int]:
+def process_single_image(task: ImageTask) -> Tuple[bool, str, int, int]:
     """
     Core image processing logic.
     Handles resizing and conversion to WebP.
     """
-    file_path, output_root, input_root, quality, max_width = args_tuple
-    
     try:
-        relative_path = file_path.relative_to(input_root)
-        output_file_path = output_root / relative_path.with_suffix('.webp')
+        relative_path = task.file_path.relative_to(task.input_root)
+        output_file_path = task.output_root / relative_path.with_suffix('.webp')
         output_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-        original_size = file_path.stat().st_size
+        original_size = task.file_path.stat().st_size
         
-        with Image.open(file_path) as img:
+        with Image.open(task.file_path) as img:
             # Smart Resize
-            if max_width and img.width > max_width:
-                ratio = max_width / img.width
+            if task.max_width and img.width > task.max_width:
+                ratio = task.max_width / img.width
                 new_height = int(img.height * ratio)
-                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
+                img = img.resize((task.max_width, new_height), Image.Resampling.LANCZOS)
 
-            img.save(output_file_path, 'webp', quality=quality, method=6)
+            img.save(output_file_path, 'webp', quality=task.quality, method=6)
             
         new_size = output_file_path.stat().st_size
-        return (True, file_path.name, original_size, new_size)
+        return (True, task.file_path.name, original_size, new_size)
 
     except Exception as e:
-        return (False, f"{file_path.name}: {e}", 0, 0)
+        return (False, f"{task.file_path.name}: {e}", 0, 0)
 
 def main():
+    """
+    Main entry point for the CLI.
+    Parses arguments, handles interactive mode, and orchestrates the batch processing.
+    """
     # Setting prog='imgopt' hides 'optimize.py' and makes it look like a binary
     parser = argparse.ArgumentParser(
         prog=__prog_name__,
@@ -254,7 +268,12 @@ def main():
     logger.info("-" * 40)
     
     start_time = time.time()
-    tasks = [(f, output_dir, input_dir, quality, target_width) for f in files]
+    
+    # Create Task Objects
+    tasks = [
+        ImageTask(f, output_dir, input_dir, quality, target_width) 
+        for f in files
+    ]
     
     success = 0
     failed = 0
